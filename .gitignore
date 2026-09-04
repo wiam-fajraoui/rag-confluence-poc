@@ -1,0 +1,14 @@
+# Environnement virtuel Python
+.venv/
+venv/
+
+# Fichiers Python compilés
+__pycache__/
+*.pyc
+
+# Base vectorielle persistante (données générées, pas du code)
+chroma_data/
+
+# Fichiers specifiques a l'IDE
+.vscode/
+.idea/
