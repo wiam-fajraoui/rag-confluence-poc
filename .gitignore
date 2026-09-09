@@ -8,7 +8,21 @@ __pycache__/
 
 # Base vectorielle persistante (données générées, pas du code)
 chroma_data/
+chroma_data_local/
+chroma_data_confluence/
 
 # Fichiers specifiques a l'IDE
 .vscode/
 .idea/
+
+# Fichiers de configuration
+.env
+
+# Scripts de test/diagnostic ponctuels (resultats deja documentes
+# dans le document de benchmark, pas necessaires a long terme)
+tests/
+scripts/
+
+# Donnees generees du benchmark
+chroma_data_benchmark/
+benchmark_results.csv
