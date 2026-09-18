@@ -25,7 +25,7 @@ class VectorStore:
 
         return self.collection.count() == 0
 
-    def add_chunks(self, chunks: list[Chunk]):
+    def add_chunks(self, chunks: list):
 
         self.collection.add(
             ids=[chunk.id for chunk in chunks],
@@ -39,7 +39,12 @@ class VectorStore:
             ]
         )
 
-    def search(self, query_embedding, n_results=3):
+    def search(self, query_embedding, n_results=3, query_text: str = None):
+
+        # query_text n'est pas utilise par ChromaDB (pas de recherche
+        # hybride ici) -- present uniquement pour garder la meme
+        # signature que les 4 connecteurs (voir vector_store_azure_search.py
+        # qui, lui, l'utilise reellement).
 
         results = self.collection.query(
             query_embeddings=[query_embedding],

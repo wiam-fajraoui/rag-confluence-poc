@@ -56,11 +56,6 @@ class VectorStoreQdrant:
 
     def add_chunks(self, chunks: list):
 
-        # Qdrant exige des identifiants numeriques ou UUID pour ses
-        # points -- les ids de chunks du projet sont des chaines
-        # (ex. "ansible_1"). On les fait passer par un hash stable
-        # pour obtenir un identifiant numerique, tout en conservant
-        # l'id d'origine dans le payload pour la tracabilite.
         points = [
             PointStruct(
                 id=self._to_point_id(chunk.id),
@@ -76,7 +71,12 @@ class VectorStoreQdrant:
 
         self.client.upsert(collection_name=self.collection_name, points=points)
 
-    def search(self, query_embedding, n_results: int = 3) -> list:
+    def search(self, query_embedding, n_results: int = 3, query_text: str = None) -> list:
+
+        # query_text n'est pas utilise par Qdrant dans cette
+        # implementation (pas de recherche hybride ici) -- present
+        # uniquement pour garder la meme signature que les 4
+        # connecteurs.
 
         results = self.client.query_points(
             collection_name=self.collection_name,
@@ -89,8 +89,6 @@ class VectorStoreQdrant:
                 id=point.payload["chunk_id"],
                 content=point.payload["content"],
                 source=point.payload["source"],
-                # Conversion score -> distance, voir docstring de
-                # la classe pour l'explication.
                 distance=1 - point.score,
             )
             for point in results
@@ -99,9 +97,6 @@ class VectorStoreQdrant:
     @staticmethod
     def _to_point_id(chunk_id: str) -> int:
 
-        # Hash stable (deterministe d'un run a l'autre, contrairement
-        # a hash() natif de Python qui varie selon la session) pour
-        # convertir un id texte en entier accepte par Qdrant.
         import hashlib
 
         digest = hashlib.sha256(chunk_id.encode("utf-8")).hexdigest()

@@ -21,10 +21,6 @@ class VectorStorePgvector:
         table_name: str = "chunks",
     ):
 
-        # La dimension doit correspondre exactement a celle du modele
-        # d'embedding utilise (384 pour all-MiniLM-L6-v2, la valeur
-        # actuelle du projet). Elle sera differente pour un autre
-        # modele (ex. les modeles d'embedding Azure OpenAI).
         self.embedding_dimension = embedding_dimension
         self.table_name = table_name
 
@@ -60,11 +56,6 @@ class VectorStorePgvector:
 
     def add_chunks(self, chunks: list):
 
-        # Insertion groupee (un seul aller-retour reseau) plutot
-        # qu'une boucle d'INSERT individuels -- necessaire pour une
-        # comparaison de performance equitable avec ChromaDB et
-        # Qdrant, qui recoivent deja leurs chunks en un seul appel
-        # (add()/upsert() avec une liste complete).
         values = [
             (
                 chunk.id,
@@ -91,16 +82,17 @@ class VectorStorePgvector:
                 template="(%s, %s, %s, %s::vector)",
             )
 
-    def search(self, query_embedding, n_results: int = 3) -> list:
+    def search(self, query_embedding, n_results: int = 3, query_text: str = None) -> list:
+
+        # query_text n'est pas utilise par pgvector dans cette
+        # implementation (pas de recherche hybride ici) -- present
+        # uniquement pour garder la meme signature que les 4
+        # connecteurs.
 
         embedding_literal = self._to_vector_literal(query_embedding)
 
         with self.conn.cursor() as cur:
 
-            # L'operateur <=> de pgvector calcule une distance
-            # cosinus (0 = identique, 2 = oppose), coherente avec le
-            # meme principe de "plus petit = plus pertinent" utilise
-            # par ChromaDB dans le reste du pipeline.
             cur.execute(
                 f"""
                 SELECT id, content, source, embedding <=> %s::vector AS distance

@@ -26,3 +26,10 @@ scripts/
 # Donnees generees du benchmark
 chroma_data_benchmark/
 benchmark_results.csv
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/.terraform.lock.hcl
+terraform/*.tfvars

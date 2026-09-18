@@ -13,6 +13,10 @@ from azure.search.documents.indexes.models import (
     HnswAlgorithmConfiguration,
     HnswParameters,
     VectorSearchProfile,
+    SemanticConfiguration,
+    SemanticPrioritizedFields,
+    SemanticField,
+    SemanticSearch,
 )
 from azure.search.documents.models import VectorizedQuery
 
@@ -26,15 +30,29 @@ class VectorStoreAzureSearch:
     avec la meme interface que les 3 autres : add_chunks(), search(),
     is_empty().
 
-    Point d'attention important : Azure AI Search retourne un score
-    de similarite (plus haut = plus pertinent) calcule avec la
-    formule score = 1 / (1 + distance_cosinus) -- confirmee
-    empiriquement en comparant les scores obtenus sur 3 vecteurs de
-    test aux distances cosinus deja connues de pgvector/Qdrant sur
-    ces memes vecteurs (concordance exacte). On inverse cette formule
-    (distance = (1/score) - 1) pour rester compatible avec le seuil
-    de filtrage existant et comparable aux deux autres backends.
+    Effectue une recherche hybride (mots-cles + vecteur) avec
+    classement semantique, confirmee fonctionnelle sur le niveau
+    Gratuit (voir test_azure_search_hybrid_semantic.py). L'ordre des
+    resultats retournes par Azure beneficie donc du reclassement
+    semantique.
+
+    Point d'attention important sur la distance retournee : le champ
+    "distance" de chaque SearchResult reste calcule a partir du score
+    de similarite brut (@search.score), pas du score de reclassement
+    semantique (@search.reranker_score). Raison : @search.score suit
+    la formule score = 1 / (1 + distance_cosinus) -- confirmee
+    empiriquement et compatible avec le seuil de filtrage existant
+    (DISTANCE_THRESHOLD = 0.75) et les distances de pgvector/Qdrant.
+    @search.reranker_score suit une toute autre echelle (0 a environ
+    4, observe empiriquement) et casserait cette comparabilite. On
+    profite donc du meilleur classement semantique sans perdre la
+    coherence du seuil de filtrage deja calibre.
+
+    Nom de la configuration semantique sur l'index :
+    "chunks-semantic-config".
     """
+
+    _SEMANTIC_CONFIG_NAME = "chunks-semantic-config"
 
     def __init__(
         self,
@@ -92,6 +110,16 @@ class VectorStoreAzureSearch:
             name=self.index_name,
             fields=fields,
             vector_search=vector_search,
+            semantic_search=SemanticSearch(
+                configurations=[
+                    SemanticConfiguration(
+                        name=self._SEMANTIC_CONFIG_NAME,
+                        prioritized_fields=SemanticPrioritizedFields(
+                            content_fields=[SemanticField(field_name="content")],
+                        ),
+                    )
+                ]
+            ),
         )
 
         self.index_client.create_or_update_index(index)
@@ -115,7 +143,7 @@ class VectorStoreAzureSearch:
 
         self.search_client.upload_documents(documents=documents)
 
-    def search(self, query_embedding, n_results: int = 3) -> list:
+    def search(self, query_embedding, n_results: int = 3, query_text: str = None) -> list:
 
         vector_query = VectorizedQuery(
             vector=query_embedding,
@@ -123,20 +151,39 @@ class VectorStoreAzureSearch:
             fields="embedding",
         )
 
-        results = self.search_client.search(
-            vector_queries=[vector_query],
-            select=["id", "content", "source"],
-            top=n_results,
-        )
+        # Recherche hybride (mots-cles + vecteur) avec classement
+        # semantique quand le texte de la question est fourni ;
+        # recherche vectorielle pure en repli sinon (comportement
+        # d'origine, garde par securite si query_text n'est pas
+        # transmis par l'appelant).
+        if query_text:
+
+            results = self.search_client.search(
+                search_text=query_text,
+                vector_queries=[vector_query],
+                query_type="semantic",
+                semantic_configuration_name=self._SEMANTIC_CONFIG_NAME,
+                select=["id", "content", "source"],
+                top=n_results,
+            )
+
+        else:
+
+            results = self.search_client.search(
+                vector_queries=[vector_query],
+                select=["id", "content", "source"],
+                top=n_results,
+            )
 
         search_results = []
 
         for r in results:
 
+            # On utilise volontairement @search.score (pas
+            # @search.reranker_score) pour le calcul de la distance
+            # -- voir la docstring de la classe pour l'explication.
             score = r["@search.score"]
 
-            # Voir la docstring de la classe pour l'explication de
-            # cette conversion.
             distance = (1 / score) - 1 if score > 0 else float("inf")
 
             search_results.append(

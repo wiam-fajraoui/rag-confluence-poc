@@ -16,6 +16,12 @@ class RAGService:
     # 0.75 laisse une marge confortable des deux côtés, mais reste une
     # valeur de départ à ajuster si de nouveaux tests révèlent des cas
     # pertinents au-delà de ce seuil (ou des cas non pertinents en-deçà).
+    #
+    # Limite connue (voir learnings-and-approach) : ce seuil n'est
+    # directement valide que pour la metrique de distance de ChromaDB.
+    # pgvector/Qdrant utilisent une distance cosinus, Azure AI Search
+    # une formule differente -- confirme fonctionner correctement en
+    # pratique sur nos tests, mais pas garanti pour tout corpus.
     DISTANCE_THRESHOLD = 0.75
 
     def __init__(
@@ -37,8 +43,15 @@ class RAGService:
             question
         )
 
+        # query_text=question transmis en plus du vecteur : necessaire
+        # pour que VectorStoreAzureSearch puisse faire une recherche
+        # hybride (mots-cles + vecteur) avec classement semantique,
+        # plutot qu'une recherche vectorielle pure. Les 3 autres
+        # connecteurs (ChromaDB, pgvector, Qdrant) acceptent ce meme
+        # parametre mais l'ignorent, pour garder une interface commune.
         search_results = self.vector_store.search(
-            question_embedding
+            question_embedding,
+            n_results=3,
         )
 
         print("\n" + "=" * 70)
