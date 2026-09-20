@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from services.document_loader import DocumentLoader
 from services.confluence_loader import ConfluenceLoader
+from services.sync_state import SyncStateStore
 from services.chunker import Chunker
 from services.embedding_service import EmbeddingService
 from services.vector_store import VectorStore
@@ -27,27 +28,32 @@ DOCS_DIR = BASE_DIR / "docs"
 
 load_dotenv(BASE_DIR / ".env")
 
-# DATA_SOURCE choisit la source des documents : "local" (fichiers
-# docs/*.md) ou "confluence" (API REST Confluence). Definie dans le
-# fichier .env, avec "local" comme valeur par defaut pour ne rien
-# casser si la variable n'est pas encore configuree.
 DATA_SOURCE = os.getenv("DATA_SOURCE", "local").strip().lower()
 
-# Une base vectorielle persistante distincte par source : basculer
-# de DATA_SOURCE ne declenche pas de reingestion (voir la correction
-# "ingestion uniquement si la base est vide" plus bas) si les deux
-# sources partageaient le meme dossier -- ce qui empecherait de les
-# comparer proprement. Chaque source a donc son propre dossier.
 CHROMA_DIR = BASE_DIR / f"chroma_data_{DATA_SOURCE}"
 
-# VECTOR_STORE choisit le moteur de recherche vectorielle : "chromadb"
-# (par defaut, comportement inchange), "pgvector", "qdrant" ou
-# "azure_search". Comme pour DATA_SOURCE, un identifiant de stockage
-# (table/collection/index) distinct par DATA_SOURCE evite de melanger
-# des donnees issues de sources differentes dans un meme espace de
-# stockage.
 VECTOR_STORE = os.getenv("VECTOR_STORE", "chromadb").strip().lower()
 STORAGE_NAME = f"chunks_{DATA_SOURCE}"
+
+# SEARCH_MODE choisit le mode de recherche : "vector" (par defaut,
+# recherche vectorielle pure, comportement historique) ou "hybrid"
+# (mots-cles + vecteur + classement semantique -- disponible
+# uniquement avec VECTOR_STORE=azure_search). Voir rag_service.py
+# pour le detail des deux seuils de distance associes, et la mise en
+# garde sur DISTANCE_THRESHOLD_HYBRID, pas encore calibre.
+SEARCH_MODE = os.getenv("SEARCH_MODE", "vector").strip().lower()
+
+if SEARCH_MODE not in ("vector", "hybrid"):
+    raise SystemExit(
+        f"SEARCH_MODE='{SEARCH_MODE}' invalide dans .env "
+        "(valeurs attendues : 'vector' ou 'hybrid')."
+    )
+
+if SEARCH_MODE == "hybrid" and VECTOR_STORE != "azure_search":
+    raise SystemExit(
+        "SEARCH_MODE=hybrid n'est disponible qu'avec VECTOR_STORE=azure_search "
+        "(seul backend a implementer la recherche hybride)."
+    )
 
 
 # -----------------------------
@@ -100,49 +106,25 @@ else:
 embedding_service = EmbeddingService()
 
 
-# -----------------------------
-# Ingestion (uniquement si la base est vide)
-# -----------------------------
+def _get_confluence_space_keys():
 
-if vector_store.is_empty():
+    space_keys = [
+        key.strip()
+        for key in os.getenv("CONFLUENCE_SPACE_KEYS", "").split(",")
+        if key.strip()
+    ]
 
-    print(f"Base vectorielle vide (source : {DATA_SOURCE}, moteur : {VECTOR_STORE}) : ingestion du corpus...")
-
-    if DATA_SOURCE == "confluence":
-
-        space_keys = [
-            key.strip()
-            for key in os.getenv("CONFLUENCE_SPACE_KEYS", "").split(",")
-            if key.strip()
-        ]
-
-        if not space_keys:
-            raise SystemExit(
-                "DATA_SOURCE=confluence mais CONFLUENCE_SPACE_KEYS "
-                "n'est pas defini dans .env (ex: CONFLUENCE_SPACE_KEYS=Infra,DevOps)."
-            )
-
-        loader = ConfluenceLoader(
-            site_url=os.getenv("CONFLUENCE_SITE_URL"),
-            email=os.getenv("CONFLUENCE_EMAIL"),
-            api_token=os.getenv("CONFLUENCE_API_TOKEN"),
-            space_keys=space_keys,
-        )
-
-    elif DATA_SOURCE == "local":
-
-        loader = DocumentLoader(DOCS_DIR)
-
-    else:
-
+    if not space_keys:
         raise SystemExit(
-            f"DATA_SOURCE='{DATA_SOURCE}' invalide dans .env "
-            "(valeurs attendues : 'local' ou 'confluence')."
+            "DATA_SOURCE=confluence mais CONFLUENCE_SPACE_KEYS "
+            "n'est pas defini dans .env (ex: CONFLUENCE_SPACE_KEYS=Infra,DevOps)."
         )
 
-    documents = loader.load_documents()
+    return space_keys
 
-    chunker = Chunker()
+
+def _embed_and_store(documents, chunker, embedding_service, vector_store):
+
     chunks = chunker.chunk_documents(documents)
 
     embedded_chunks = [
@@ -153,24 +135,88 @@ if vector_store.is_empty():
     vector_store.add_chunks(embedded_chunks)
 
     if VECTOR_STORE == "azure_search":
-        # Azure AI Search indexe de facon asynchrone : sans cette
-        # pause, une recherche lancee juste apres l'ingestion peut
-        # ne retourner aucun resultat, l'indexation n'etant pas
-        # encore terminee (meme constat fait dans
-        # benchmark_vector_stores.py).
         print("Attente de la fin de l'indexation Azure AI Search...")
         time.sleep(5)
 
+
+# -----------------------------
+# Ingestion / synchronisation
+# -----------------------------
+
+if DATA_SOURCE == "confluence":
+
+    # Pour Confluence, on ne se contente plus de verifier si la base
+    # est vide : on interroge systematiquement l'API pour detecter
+    # les pages nouvelles ou modifiees depuis la derniere execution
+    # (synchronisation incrementale). Le premier lancement (fichier
+    # de suivi absent) traite naturellement toutes les pages comme
+    # "nouvelles", sans logique separee a maintenir.
+
+    space_keys = _get_confluence_space_keys()
+
+    loader = ConfluenceLoader(
+        site_url=os.getenv("CONFLUENCE_SITE_URL"),
+        email=os.getenv("CONFLUENCE_EMAIL"),
+        api_token=os.getenv("CONFLUENCE_API_TOKEN"),
+        space_keys=space_keys,
+    )
+
+    sync_state_path = BASE_DIR / f"sync_state_{DATA_SOURCE}.json"
+    sync_state = SyncStateStore(sync_state_path)
+
+    print("Vérification des pages Confluence nouvelles ou modifiées...")
+    changed_documents = loader.load_changed_documents(sync_state)
+
+    if changed_documents:
+
+        print(f"{len(changed_documents)} page(s) nouvelle(s) ou modifiée(s) : ingestion en cours...")
+
+        chunker = Chunker()
+        _embed_and_store(changed_documents, chunker, embedding_service, vector_store)
+
+        # Sauvegarde de l'etat seulement apres succes de l'ingestion,
+        # pour ne pas marquer une page comme synchronisee si
+        # l'embedding ou l'indexation a echoue en cours de route.
+        sync_state.save()
+
+        print("Synchronisation terminée.")
+
+    else:
+
+        print("Aucune page modifiée depuis la dernière synchronisation.")
+
+elif DATA_SOURCE == "local":
+
+    # Pas de synchronisation incrementale pour les fichiers locaux
+    # (non demande par la roadmap, qui ne le prevoit que pour
+    # Confluence) -- comportement inchange : ingestion complete
+    # uniquement si la base est vide.
+
+    if vector_store.is_empty():
+
+        print(f"Base vectorielle vide (source : {DATA_SOURCE}, moteur : {VECTOR_STORE}) : ingestion du corpus...")
+
+        loader = DocumentLoader(DOCS_DIR)
+        documents = loader.load_documents()
+
+        chunker = Chunker()
+        _embed_and_store(documents, chunker, embedding_service, vector_store)
+
+    else:
+
+        print(
+            f"Base vectorielle déjà peuplée (source : {DATA_SOURCE}, moteur : {VECTOR_STORE}) : "
+            "ingestion sautée.\n"
+            "Pour forcer une réingestion complète, supprimer le dossier "
+            f"{CHROMA_DIR.name}/ (ChromaDB) ou vider la table/collection/index "
+            f"'{STORAGE_NAME}' correspondante, puis relancer."
+        )
+
 else:
 
-    print(
-        f"Base vectorielle déjà peuplée (source : {DATA_SOURCE}, moteur : {VECTOR_STORE}) : "
-        "ingestion sautée.\n"
-        "Pour forcer une réingestion complète (ex. après "
-        "modification du corpus) : supprimer le dossier "
-        f"{CHROMA_DIR.name}/ (ChromaDB), ou vider/supprimer la "
-        f"table/collection/index '{STORAGE_NAME}' correspondante "
-        "(pgvector/Qdrant/Azure AI Search), puis relancer."
+    raise SystemExit(
+        f"DATA_SOURCE='{DATA_SOURCE}' invalide dans .env "
+        "(valeurs attendues : 'local' ou 'confluence')."
     )
 
 
@@ -178,8 +224,6 @@ else:
 # Services IA
 # -----------------------------
 
-# LLM_SERVICE choisit le moteur de generation : "ollama" (par
-# defaut, comportement inchange) ou "azure_openai".
 LLM_SERVICE = os.getenv("LLM_SERVICE", "ollama").strip().lower()
 
 prompt_builder = PromptBuilder()
@@ -212,7 +256,8 @@ rag_service = RAGService(
     embedding_service=embedding_service,
     vector_store=vector_store,
     prompt_builder=prompt_builder,
-    llm_service=llm_service
+    llm_service=llm_service,
+    use_hybrid=(SEARCH_MODE == "hybrid"),
 )
 
 

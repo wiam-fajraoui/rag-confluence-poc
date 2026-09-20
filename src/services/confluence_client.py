@@ -34,8 +34,10 @@ class ConfluenceClient:
         """
         Récupère toutes les pages d'un espace, avec pagination
         automatique, y compris leur contenu au format Storage
-        (body.storage) et leurs ancêtres (pour repérer les pages
-        enfants et reconstituer une hiérarchie si besoin).
+        (body.storage), leurs ancêtres (hiérarchie) et leur version
+        (version.number -- nécessaire pour la synchronisation
+        incrémentale : détecter qu'une page a changé depuis la
+        dernière ingestion sans comparer tout le contenu).
         """
 
         pages = []
@@ -43,7 +45,7 @@ class ConfluenceClient:
         url = self.content_url
         params = {
             "spaceKey": space_key,
-            "expand": "body.storage,ancestors",
+            "expand": "body.storage,ancestors,version",
             "limit": limit,
         }
 

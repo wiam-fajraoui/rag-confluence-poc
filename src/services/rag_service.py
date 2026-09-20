@@ -7,35 +7,62 @@ from models.chat_response import ChatResponse
 
 class RAGService:
 
-    # Seuil de distance ChromaDB au-delà duquel un résultat est considéré
-    # comme non pertinent et n'est pas transmis au LLM.
+    # Seuil de distance au-delà duquel un résultat est considéré
+    # comme non pertinent et n'est pas transmis au LLM -- pour le
+    # mode de recherche VECTORIEL (par défaut).
     #
     # Calibré empiriquement sur la baseline de tests :
     #   - chunks réellement pertinents observés : 0.35 - 0.53
     #   - chunks bruités / hors-sujet observés   : 0.95 - 1.35
-    # 0.75 laisse une marge confortable des deux côtés, mais reste une
-    # valeur de départ à ajuster si de nouveaux tests révèlent des cas
-    # pertinents au-delà de ce seuil (ou des cas non pertinents en-deçà).
+    # 0.75 laisse une marge confortable des deux côtés.
     #
-    # Limite connue (voir learnings-and-approach) : ce seuil n'est
-    # directement valide que pour la metrique de distance de ChromaDB.
-    # pgvector/Qdrant utilisent une distance cosinus, Azure AI Search
-    # une formule differente -- confirme fonctionner correctement en
-    # pratique sur nos tests, mais pas garanti pour tout corpus.
-    DISTANCE_THRESHOLD = 0.75
+    # Limite connue : ce seuil n'est directement valide que pour la
+    # metrique de distance "vectorielle pure". pgvector/Qdrant
+    # utilisent une distance cosinus, Azure AI Search une formule
+    # differente -- confirme fonctionner correctement en pratique sur
+    # nos tests, mais pas garanti pour tout corpus.
+    DISTANCE_THRESHOLD_VECTOR = 0.75
+
+    # Seuil pour le mode HYBRIDE (mots-cles + vecteur + classement
+    # semantique, disponible uniquement avec Azure AI Search).
+    #
+    # Calibre empiriquement sur la distance derivee de
+    # @search.reranker_score (voir vector_store_azure_search.py pour
+    # le detail du calcul : distance = 4.0 - reranker_score) :
+    #   - cas pertinents observes   : 0.53 - 1.52
+    #   - cas hors-sujet observes   : 2.16 - 2.28
+    # 1.75 se situe entre les deux, avec une marge un peu plus large
+    # cote hors-sujet (0.41) que cote pertinent (0.23), et reste en
+    # retrait du milieu exact (1.84) par prudence -- la documentation
+    # officielle d'Azure previent que le reranker_score peut varier
+    # legerement d'une requete a l'autre, mieux vaut ne pas coller
+    # au plus juste avec seulement deux points de donnees de chaque
+    # cote (echantillon encore limite).
+    DISTANCE_THRESHOLD_HYBRID = 1.75
 
     def __init__(
         self,
         embedding_service: EmbeddingService,
         vector_store: VectorStore,
         prompt_builder: PromptBuilder,
-        llm_service: LLMService
+        llm_service: LLMService,
+        use_hybrid: bool = False,
     ):
 
         self.embedding_service = embedding_service
         self.vector_store = vector_store
         self.prompt_builder = prompt_builder
         self.llm_service = llm_service
+        self.use_hybrid = use_hybrid
+
+    @property
+    def distance_threshold(self):
+
+        return (
+            self.DISTANCE_THRESHOLD_HYBRID
+            if self.use_hybrid
+            else self.DISTANCE_THRESHOLD_VECTOR
+        )
 
     def ask(self, question: str):
 
@@ -43,15 +70,16 @@ class RAGService:
             question
         )
 
-        # query_text=question transmis en plus du vecteur : necessaire
-        # pour que VectorStoreAzureSearch puisse faire une recherche
-        # hybride (mots-cles + vecteur) avec classement semantique,
-        # plutot qu'une recherche vectorielle pure. Les 3 autres
-        # connecteurs (ChromaDB, pgvector, Qdrant) acceptent ce meme
-        # parametre mais l'ignorent, pour garder une interface commune.
+        # query_text n'est transmis que si le mode hybride est actif
+        # (self.use_hybrid) : c'est ce qui declenche la recherche
+        # hybride + classement semantique cote VectorStoreAzureSearch.
+        # En mode vectoriel (par defaut), on passe None, exactement
+        # comme avant l'ajout de cette fonctionnalite -- aucune
+        # regression sur le comportement existant.
         search_results = self.vector_store.search(
             question_embedding,
             n_results=3,
+            query_text=question if self.use_hybrid else None,
         )
 
         print("\n" + "=" * 70)
@@ -74,10 +102,10 @@ class RAGService:
         filtered_results = [
             result
             for result in search_results
-            if result.distance <= self.DISTANCE_THRESHOLD
+            if result.distance <= self.distance_threshold
         ]
 
-        print(f"\nRésultats retenus (seuil = {self.DISTANCE_THRESHOLD})\n")
+        print(f"\nRésultats retenus (seuil = {self.distance_threshold})\n")
 
         if not filtered_results:
             print("Aucun résultat sous le seuil.")

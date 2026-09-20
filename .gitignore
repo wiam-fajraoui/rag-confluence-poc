@@ -33,3 +33,6 @@ terraform/*.tfstate
 terraform/*.tfstate.*
 terraform/.terraform.lock.hcl
 terraform/*.tfvars
+
+# Etat de synchronisation Confluence (donnee generee, pas du code)
+sync_state_*.json

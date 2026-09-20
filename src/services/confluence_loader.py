@@ -3,7 +3,7 @@ from services.storage_format_converter import StorageFormatConverter
 from models.document import Document
 
 
-# Titres de pages generées automatiquement par Confluence à la
+# Titres de pages générées automatiquement par Confluence à la
 # création d'un espace, sans contenu documentaire réel -> à exclure
 # systématiquement de l'ingestion.
 _DEFAULT_EXCLUDED_TITLES = {
@@ -17,9 +17,17 @@ class ConfluenceLoader:
     Charge les documents depuis Confluence, en remplacement de
     DocumentLoader (qui lit des fichiers docs/*.md en local).
 
-    Fournit la même interface (load_documents() -> list[Document])
-    afin que le reste du pipeline (chunker.py, embedding_service.py,
-    vector_store.py, rag_service.py) fonctionne sans modification.
+    Fournit deux méthodes :
+    - load_documents() : charge tout le corpus (comportement
+      d'origine, toujours disponible si besoin d'un rechargement
+      complet).
+    - load_changed_documents(sync_state) : ne charge que les pages
+      nouvelles ou dont le numéro de version a changé depuis la
+      dernière synchronisation. Fonctionne aussi bien pour un
+      premier chargement (sync_state vide -> tout est "nouveau")
+      que pour les suivants (sync_state déjà rempli -> seules les
+      vraies modifications sont retournées), ce qui évite d'avoir
+      deux chemins de code séparés pour ces deux cas.
     """
 
     def __init__(
@@ -58,6 +66,43 @@ class ConfluenceLoader:
 
         return documents
 
+    def load_changed_documents(self, sync_state) -> list:
+        """
+        Ne retourne que les pages nouvelles ou modifiees depuis la
+        derniere synchronisation. Met a jour sync_state en place
+        (set_version) pour chaque page conservee -- l'appelant est
+        responsable d'appeler sync_state.save() une fois
+        l'ingestion de ces documents terminee avec succes (pas
+        avant, pour ne pas marquer une page comme synchronisee si
+        l'embedding/l'indexation echoue en cours de route).
+        """
+
+        changed_documents = []
+
+        for space_key in self.space_keys:
+
+            pages = self.client.get_pages_in_space(space_key)
+
+            for page in pages:
+
+                if self._should_skip(page, space_key):
+                    continue
+
+                page_id = page.get("id", "")
+                current_version = page.get("version", {}).get("number")
+
+                known_version = sync_state.get_version(page_id)
+
+                if known_version is not None and known_version == current_version:
+                    continue  # pas de changement depuis la derniere fois
+
+                document = self._to_document(page, space_key)
+                changed_documents.append(document)
+
+                sync_state.set_version(page_id, current_version)
+
+        return changed_documents
+
     def _should_skip(self, page: dict, space_key: str) -> bool:
 
         title = page.get("title", "")
@@ -68,9 +113,6 @@ class ConfluenceLoader:
         # Heuristique : la page d'accueil auto-générée d'un espace
         # porte généralement le même titre que l'espace lui-même
         # (sauf renommage manuel).
-        # Limite connue : si une vraie page de contenu portait ce
-        # même titre exact que l'espace, elle serait aussi exclue à
-        # tort. À surveiller si ce cas se présente un jour.
         if title == space_key:
             return True
 
@@ -89,9 +131,6 @@ class ConfluenceLoader:
 
         body_markdown = self.converter.convert(storage_value)
 
-        # Le titre H1 du document vient du titre de la page Confluence,
-        # pas du corps -- cohérent avec le format des fichiers locaux
-        # (document_title extrait de la ligne "# Titre" par chunker.py).
         content = f"# {title}\n\n{body_markdown}"
 
         ancestors = page.get("ancestors", [])

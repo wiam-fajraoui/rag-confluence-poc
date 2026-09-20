@@ -36,17 +36,26 @@ class VectorStoreAzureSearch:
     resultats retournes par Azure beneficie donc du reclassement
     semantique.
 
-    Point d'attention important sur la distance retournee : le champ
-    "distance" de chaque SearchResult reste calcule a partir du score
-    de similarite brut (@search.score), pas du score de reclassement
-    semantique (@search.reranker_score). Raison : @search.score suit
-    la formule score = 1 / (1 + distance_cosinus) -- confirmee
-    empiriquement et compatible avec le seuil de filtrage existant
-    (DISTANCE_THRESHOLD = 0.75) et les distances de pgvector/Qdrant.
-    @search.reranker_score suit une toute autre echelle (0 a environ
-    4, observe empiriquement) et casserait cette comparabilite. On
-    profite donc du meilleur classement semantique sans perdre la
-    coherence du seuil de filtrage deja calibre.
+    Calcul de la distance -- deux cas selon le mode :
+
+    - Mode vectoriel pur (query_text absent) : formule
+      score = 1 / (1 + distance_cosinus), confirmee empiriquement,
+      compatible avec RAGService.DISTANCE_THRESHOLD_VECTOR.
+
+    - Mode hybride (query_text fourni) : utilise
+      @search.reranker_score plutot que @search.score. Ce choix
+      fait suite a un test de calibration qui a montre que
+      @search.score (le score de fusion mots-cles+vecteur, type
+      Reciprocal Rank Fusion) ne separe PAS correctement les cas
+      pertinents des cas hors-sujet -- un document sans rapport
+      pouvait obtenir un meilleur score qu'un document pertinent,
+      simplement par recoupement de mots-cles. @search.reranker_score
+      est documente officiellement par Microsoft sur une echelle
+      fixe de 0 (non pertinent) a 4 (repond completement a la
+      question), pensee specifiquement pour mesurer la pertinence
+      -- convertie ici en distance (4 - reranker_score) pour garder
+      la convention "plus petit = plus pertinent" du reste du
+      pipeline. A utiliser avec RAGService.DISTANCE_THRESHOLD_HYBRID.
 
     Nom de la configuration semantique sur l'index :
     "chunks-semantic-config".
@@ -179,12 +188,25 @@ class VectorStoreAzureSearch:
 
         for r in results:
 
-            # On utilise volontairement @search.score (pas
-            # @search.reranker_score) pour le calcul de la distance
-            # -- voir la docstring de la classe pour l'explication.
-            score = r["@search.score"]
+            if query_text:
 
-            distance = (1 / score) - 1 if score > 0 else float("inf")
+                # Mode hybride : on utilise desormais le score de
+                # reclassement semantique (@search.reranker_score),
+                # documente officiellement sur une echelle fixe de 0
+                # (non pertinent) a 4 (repond completement a la
+                # question) -- voir la docstring de la classe.
+                # Converti en distance (0 = parfait, 4 = hors-sujet)
+                # pour rester compatible avec la convention
+                # "plus petit = plus pertinent" du reste du pipeline.
+                reranker_score = r["@search.reranker_score"]
+                distance = 4.0 - reranker_score
+
+            else:
+
+                # Mode vectoriel pur : formule cosinus habituelle,
+                # inchangee.
+                score = r["@search.score"]
+                distance = (1 / score) - 1 if score > 0 else float("inf")
 
             search_results.append(
                 SearchResult(

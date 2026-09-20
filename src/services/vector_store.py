@@ -27,7 +27,12 @@ class VectorStore:
 
     def add_chunks(self, chunks: list):
 
-        self.collection.add(
+        # upsert() plutot que add() : necessaire pour la
+        # synchronisation incrementale -- si une page Confluence est
+        # modifiee, ses chunks reutilisent les memes ids, et add()
+        # echouerait avec une erreur de doublon. upsert() met a jour
+        # le chunk existant si l'id est deja present, l'ajoute sinon.
+        self.collection.upsert(
             ids=[chunk.id for chunk in chunks],
             documents=[chunk.content for chunk in chunks],
             embeddings=[chunk.embedding for chunk in chunks],
