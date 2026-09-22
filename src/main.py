@@ -22,7 +22,7 @@ print("\nRéponse\n")
 
 print(response.answer)
 
-print("\nSources\n")
+print("\nCitations\n")
 
-for source in response.sources:
-    print(f"- {source}")
+for citation in response.citations:
+    print(f"[{citation.number}] {citation.source} — {citation.excerpt}")

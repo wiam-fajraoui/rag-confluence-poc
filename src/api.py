@@ -11,6 +11,7 @@ Documentation interactive generee automatiquement, une fois lancee :
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from services.app_setup import build_rag_service
@@ -51,6 +52,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS : autorise le serveur de developpement Nuxt (port 3000 par
+# defaut) a appeler cette API depuis le navigateur. Sans ca, le
+# navigateur bloquerait silencieusement les requetes -- deux ports
+# differents sont consideres comme deux origines differentes.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class AskRequest(BaseModel):
 
@@ -62,10 +74,17 @@ class AskRequest(BaseModel):
     )
 
 
+class CitationOut(BaseModel):
+
+    number: int = Field(description="Numéro du marqueur de citation dans le texte de la réponse.")
+    source: str = Field(description="Fichier/page source à l'origine de cette citation.")
+    excerpt: str = Field(description="Extrait du passage utilisé.")
+
+
 class AskResponse(BaseModel):
 
-    answer: str = Field(description="La réponse générée par l'assistant.")
-    sources: list = Field(description="Les documents Confluence utilisés pour répondre.")
+    answer: str = Field(description="La réponse générée par l'assistant, avec des marqueurs [n] renvoyant aux citations.")
+    citations: list = Field(description="Les citations précises (source + extrait) appuyant la réponse.")
 
 
 @app.get("/health", summary="Vérifie que l'API et le pipeline RAG sont opérationnels")
@@ -100,4 +119,10 @@ def ask(request: AskRequest):
 
     response = rag_service.ask(question)
 
-    return AskResponse(answer=response.answer, sources=response.sources)
+    return AskResponse(
+        answer=response.answer,
+        citations=[
+            CitationOut(number=c.number, source=c.source, excerpt=c.excerpt)
+            for c in response.citations
+        ],
+    )

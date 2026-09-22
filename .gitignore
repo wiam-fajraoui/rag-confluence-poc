@@ -36,3 +36,9 @@ terraform/*.tfvars
 
 # Etat de synchronisation Confluence (donnee generee, pas du code)
 sync_state_*.json
+
+# Frontend Nuxt (chat-interface/)
+chat-interface/node_modules/
+chat-interface/.nuxt/
+chat-interface/.output/
+chat-interface/.env

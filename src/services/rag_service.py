@@ -1,8 +1,16 @@
+import re
+
 from services.embedding_service import EmbeddingService
 from services.vector_store import VectorStore
 from services.prompt_builder import PromptBuilder
 from services.llm_service import LLMService
 from models.chat_response import ChatResponse
+from models.citation import Citation
+
+
+# Longueur maximale de l'extrait affiche pour chaque citation, pour
+# rester lisible dans l'interface (pas le chunk entier).
+_EXCERPT_MAX_LENGTH = 160
 
 
 class RAGService:
@@ -31,13 +39,10 @@ class RAGService:
     # le detail du calcul : distance = 4.0 - reranker_score) :
     #   - cas pertinents observes   : 0.53 - 1.52
     #   - cas hors-sujet observes   : 2.16 - 2.28
-    # 1.75 se situe entre les deux, avec une marge un peu plus large
-    # cote hors-sujet (0.41) que cote pertinent (0.23), et reste en
-    # retrait du milieu exact (1.84) par prudence -- la documentation
-    # officielle d'Azure previent que le reranker_score peut varier
-    # legerement d'une requete a l'autre, mieux vaut ne pas coller
-    # au plus juste avec seulement deux points de donnees de chaque
-    # cote (echantillon encore limite).
+    # 1.75 se situe entre les deux. Limite connue (voir dossier
+    # d'architecture) : un cas reel observe en usage (distance 1.87)
+    # est tombe dans la zone grise jamais couverte par la
+    # calibration -- seuil a affiner avec un echantillon plus large.
     DISTANCE_THRESHOLD_HYBRID = 1.75
 
     def __init__(
@@ -70,12 +75,6 @@ class RAGService:
             question
         )
 
-        # query_text n'est transmis que si le mode hybride est actif
-        # (self.use_hybrid) : c'est ce qui declenche la recherche
-        # hybride + classement semantique cote VectorStoreAzureSearch.
-        # En mode vectoriel (par defaut), on passe None, exactement
-        # comme avant l'ajout de cette fonctionnalite -- aucune
-        # regression sur le comportement existant.
         search_results = self.vector_store.search(
             question_embedding,
             n_results=3,
@@ -124,7 +123,7 @@ class RAGService:
 
             return ChatResponse(
                 answer="Je ne trouve pas cette information dans la documentation.",
-                sources=[]
+                citations=[]
             )
 
         prompt = self.prompt_builder.build_prompt(
@@ -142,14 +141,83 @@ class RAGService:
             prompt
         )
 
-        sources = sorted(
-            {
-                result.source
-                for result in filtered_results
-            }
-        )
+        citations = self._extract_citations(answer, filtered_results)
 
         return ChatResponse(
             answer=answer,
-            sources=sources
+            citations=citations
         )
+
+    def _extract_citations(self, answer: str, filtered_results: list) -> list:
+        """
+        Extrait les citations numerotees [n] reellement inserees par
+        le LLM dans sa reponse, et les relie aux chunks correspondants
+        (DOCUMENT n dans le prompt = filtered_results[n-1]).
+
+        Repli si le LLM n'a insere aucun marqueur (peut arriver, le
+        respect de cette consigne n'est pas garanti a 100% -- voir
+        note de calibration dans le dossier d'architecture) : on
+        liste alors les sources uniques de filtered_results, sans
+        marqueur precis, plutot que de ne rien attribuer du tout.
+        """
+
+        cited_numbers = sorted(
+            {
+                int(match)
+                for match in re.findall(r"\[(\d+)\]", answer)
+            }
+        )
+
+        citations = []
+
+        for number in cited_numbers:
+
+            index = number - 1
+
+            if 0 <= index < len(filtered_results):
+
+                result = filtered_results[index]
+
+                citations.append(
+                    Citation(
+                        number=number,
+                        source=result.source,
+                        excerpt=self._make_excerpt(result.content),
+                    )
+                )
+
+        if citations:
+            return citations
+
+        # Repli : aucun marqueur valide trouve dans la reponse.
+        seen_sources = set()
+        fallback_citations = []
+
+        for i, result in enumerate(filtered_results, start=1):
+
+            if result.source in seen_sources:
+                continue
+
+            seen_sources.add(result.source)
+
+            fallback_citations.append(
+                Citation(
+                    number=i,
+                    source=result.source,
+                    excerpt=self._make_excerpt(result.content),
+                )
+            )
+
+        return fallback_citations
+
+    @staticmethod
+    def _make_excerpt(content: str) -> str:
+
+        flattened = " ".join(content.split())
+
+        if len(flattened) <= _EXCERPT_MAX_LENGTH:
+            return flattened
+
+        truncated = flattened[:_EXCERPT_MAX_LENGTH].rsplit(" ", 1)[0]
+
+        return truncated + "…"
