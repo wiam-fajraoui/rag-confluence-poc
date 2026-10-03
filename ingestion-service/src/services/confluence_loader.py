@@ -1,6 +1,6 @@
-from connectors.confluence_client import ConfluenceClient              
-from connectors.storage_format_converter import StorageFormatConverter 
-
+from connectors.confluence_client import ConfluenceClient
+from connectors.storage_format_converter import StorageFormatConverter
+from models.document import Document
 
 # Titres de pages générées automatiquement par Confluence à la
 # création d'un espace, sans contenu documentaire réel -> à exclure
