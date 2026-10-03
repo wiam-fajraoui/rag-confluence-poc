@@ -18,10 +18,15 @@ chroma_data_confluence/
 # Fichiers de configuration
 .env
 
-# Scripts de test/diagnostic ponctuels (resultats deja documentes
-# dans le document de benchmark, pas necessaires a long terme)
-tests/
-scripts/
+# Archives locales (scripts de benchmark et utilitaires)
+benchmarks/
+ingestion-service/scripts/
+
+# Secrets et données générées propres à chaque service
+ingestion-service/.env
+rag-service/.env
+ingestion-service/data/
+rag-service/data/
 
 # Donnees generees du benchmark
 chroma_data_benchmark/

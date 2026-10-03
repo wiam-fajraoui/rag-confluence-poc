@@ -1,10 +1,9 @@
 import re
 
-from services.embedding_service import EmbeddingService
-from services.vector_store import VectorStore
+from connectors.embedding_service import EmbeddingService  
+from connectors.vector_store import VectorStore            
 from services.prompt_builder import PromptBuilder
-from services.llm_service import LLMService
-from models.chat_response import ChatResponse
+from connectors.llm_service import LLMService              
 from models.citation import Citation
 
 

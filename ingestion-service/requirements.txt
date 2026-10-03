@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+beautifulsoup4
+lxml
+sentence-transformers
+chromadb
+psycopg2-binary
+qdrant-client
+azure-search-documents

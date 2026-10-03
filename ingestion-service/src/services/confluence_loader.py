@@ -1,6 +1,5 @@
-from services.confluence_client import ConfluenceClient
-from services.storage_format_converter import StorageFormatConverter
-from models.document import Document
+from connectors.confluence_client import ConfluenceClient              
+from connectors.storage_format_converter import StorageFormatConverter 
 
 
 # Titres de pages générées automatiquement par Confluence à la

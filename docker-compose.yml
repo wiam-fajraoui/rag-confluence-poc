@@ -1,0 +1,51 @@
+services:
+
+  ingestion-service:
+    build: ./ingestion-service
+    env_file: ./ingestion-service/.env
+    environment:
+      DATA_DIR: /data
+      CHROMA_DIR: /shared/chroma
+    volumes:
+      # Persiste sync_state_*.json : sans ce volume, chaque
+      # redemarrage du conteneur reingererait tout le corpus.
+      - ingestion_data:/data
+      - chroma_shared:/shared/chroma
+    ports:
+      - "8001:8001"
+    healthcheck:
+      # /health ne repond qu'apres la synchronisation initiale.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  rag-service:
+    build: ./rag-service
+    env_file: ./rag-service/.env
+    environment:
+      # Nom du service compose = nom d'hote sur le reseau Docker.
+      INGESTION_SERVICE_URL: http://ingestion-service:8001
+      CHROMA_DIR: /shared/chroma
+    volumes:
+      - chroma_shared:/shared/chroma
+    ports:
+      - "8000:8000"
+    depends_on:
+      ingestion-service:
+        condition: service_healthy
+
+  chat-interface:
+    build: ./chat-interface
+    environment:
+      # Appel fait par le NAVIGATEUR -> localhost = machine hote.
+      NUXT_PUBLIC_API_BASE: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - rag-service
+
+volumes:
+  ingestion_data:
+  chroma_shared:
