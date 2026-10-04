@@ -25,7 +25,7 @@ class FakePipeline:
     def ask(self, question):
         if question == "question hors corpus":
             return FakeChatResponse("Je ne trouve pas cette information dans la documentation.", [])
-        return FakeChatResponse(f"Réponse [1]", [FakeCitation(1, "exemple.md", "Extrait.")])
+        return FakeChatResponse("Réponse [1]", [FakeCitation(1, "exemple.md", "Extrait.")])
 
 
 FAKE_STATUS = {"reachable": True, "ready": True, "vector_store": "chromadb", "storage_name": "chunks_local"}
@@ -33,8 +33,11 @@ FAKE_STATUS = {"reachable": True, "ready": True, "vector_store": "chromadb", "st
 
 @pytest.fixture
 def client():
-    with patch("main._build_pipeline", return_value=FakePipeline()), \
-         patch("main.get_ingestion_status", return_value=FAKE_STATUS):
+    # get_ingestion_status est utilise a deux endroits (demarrage dans
+    # main.py, endpoint dans routes/health.py) : on remplace les deux.
+    with patch("main.build_pipeline", return_value=FakePipeline()), \
+         patch("main.get_ingestion_status", return_value=FAKE_STATUS), \
+         patch("routes.health.get_ingestion_status", return_value=FAKE_STATUS):
         with TestClient(main.app) as test_client:
             yield test_client
 

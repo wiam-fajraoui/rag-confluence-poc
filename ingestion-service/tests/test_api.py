@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from fastapi.testclient import TestClient
 
 import main
+from services.sync_coordinator import SyncAlreadyRunning, SyncCoordinator
 
 
 class FakePipeline:
@@ -42,3 +43,9 @@ def test_status_ready_after_startup(client):
 def test_sync_returns_summary(client):
     body = client.post("/sync").json()
     assert body["status"] == "up_to_date"
+
+
+def test_sync_conflict_returns_409(client):
+    # Simule une synchronisation deja en cours.
+    with patch.object(SyncCoordinator, "run", side_effect=SyncAlreadyRunning()):
+        assert client.post("/sync").status_code == 409
