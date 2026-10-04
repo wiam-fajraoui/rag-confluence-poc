@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-
+ENV PYTHONUNBUFFERED=1
 # PyTorch en version CPU uniquement (installe avant
 # sentence-transformers) : evite d'embarquer les librairies CUDA,
 # inutiles ici, qui alourdiraient l'image de plusieurs Go.

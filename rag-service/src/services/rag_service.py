@@ -31,19 +31,17 @@ class RAGService:
     # nos tests, mais pas garanti pour tout corpus.
     DISTANCE_THRESHOLD_VECTOR = 0.75
 
-    # Seuil pour le mode HYBRIDE (mots-cles + vecteur + classement
-    # semantique, disponible uniquement avec Azure AI Search).
+    # Seuil pour le mode HYBRIDE (distance = 4.0 - reranker_score).
     #
-    # Calibre empiriquement sur la distance derivee de
-    # @search.reranker_score (voir vector_store_azure_search.py pour
-    # le detail du calcul : distance = 4.0 - reranker_score) :
-    #   - cas pertinents observes   : 0.53 - 1.52
-    #   - cas hors-sujet observes   : 2.16 - 2.28
-    # 1.75 se situe entre les deux. Limite connue (voir dossier
-    # d'architecture) : un cas reel observe en usage (distance 1.87)
-    # est tombe dans la zone grise jamais couverte par la
-    # calibration -- seuil a affiner avec un echantillon plus large.
-    DISTANCE_THRESHOLD_HYBRID = 1.75
+    # Recalibre sur 5 questions et 19 resultats observes en usage reel :
+    #   - passages pertinents (definitions, reponses directes) : 0.53 - 1.88
+    #   - passages hors sujet                                   : 2.16 - 2.40
+    # Le seuil initial de 1.75 (calibre sur 3 questions seulement)
+    # rejetait des definitions indispensables aux questions de
+    # comparaison (Ansible 1.77, Prometheus 1.87, Kubernetes 1.88).
+    # 2.0 les inclut toutes et garde une marge de 0.16 avant le
+    # premier passage hors sujet.
+    DISTANCE_THRESHOLD_HYBRID = 2.0
 
     def __init__(
         self,
@@ -77,7 +75,7 @@ class RAGService:
 
         search_results = self.vector_store.search(
             question_embedding,
-            n_results=3,
+            n_results=5,
             query_text=question if self.use_hybrid else None,
         )
 
@@ -188,6 +186,12 @@ class RAGService:
 
         if citations:
             return citations
+        
+        # Refus explicite sans aucun marqueur : le LLM n'a rien utilise
+        # du contexte. Le repli afficherait des sources qui n'ont pas
+        # servi a la reponse -> aucune citation.
+        if "ne trouve pas cette information" in answer.lower():
+            return []
 
         # Repli : aucun marqueur valide trouve dans la reponse.
         seen_sources = set()

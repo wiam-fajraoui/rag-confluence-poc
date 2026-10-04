@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
 
 # PyTorch CPU uniquement (meme raison que l'ingestion-service).
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
