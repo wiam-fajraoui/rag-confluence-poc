@@ -4,15 +4,11 @@ from pathlib import Path
 
 class SyncStateStore:
     """
-    Suivi local des versions de pages Confluence deja ingerees, pour
-    permettre une synchronisation incrementale : ne retraiter que les
-    pages nouvelles ou modifiees depuis la derniere execution,
-    plutot que de tout recharger a chaque fois.
+    Memoire des pages deja indexees : {page_id: derniere_version_indexee}.
 
-    Stocke un simple fichier JSON {page_id: numero_de_version}, a
-    cote des autres donnees generees du projet (chroma_data_*/) --
-    pas destine a etre committe dans Git (donnee locale, pas du
-    code).
+    Doit toujours refleter le contenu reel de l'index : une page n'y
+    est notee qu'apres une indexation reussie, et en est retiree des
+    que ses fiches sont supprimees de l'index.
     """
 
     def __init__(self, path):
@@ -40,6 +36,10 @@ class SyncStateStore:
     def set_version(self, page_id: str, version: int):
 
         self._state[page_id] = version
+
+    def remove(self, page_id: str):
+
+        self._state.pop(page_id, None)
 
     def known_page_ids(self) -> set:
 

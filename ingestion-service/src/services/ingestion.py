@@ -1,8 +1,10 @@
 """
 Pipeline d'ingestion : chargement -> decoupage -> embeddings ->
-indexation. Les objets couteux (modele d'embedding, connexion a la
-base vectorielle) sont crees une seule fois, puis reutilises a
-chaque synchronisation.
+indexation -> nettoyage des fiches obsoletes.
+
+Les objets couteux (modele d'embedding, connexion a la base
+vectorielle) sont crees une seule fois, puis reutilises a chaque
+synchronisation.
 """
 
 import os
@@ -37,8 +39,7 @@ class IngestionPipeline:
         self.vector_store_name = get_vector_store_name()
 
         # Nom de l'espace de stockage : CONTRAT partage avec le
-        # rag-service, qui le recalcule de la meme facon a partir de
-        # DATA_SOURCE pour lire le meme index.
+        # rag-service, qui le recalcule a partir de DATA_SOURCE.
         self.storage_name = f"chunks_{self.data_source}"
 
         self.data_dir = Path(os.getenv("DATA_DIR", SERVICE_ROOT / "data"))
@@ -55,6 +56,17 @@ class IngestionPipeline:
 
         self.embedding_service = EmbeddingService()
         self.chunker = Chunker()
+
+        # Seul le connecteur Azure AI Search sait supprimer les
+        # fiches d'une page. Avec les autres backends, la suppression
+        # est desactivee (avertissement au demarrage).
+        self.can_delete = hasattr(self.vector_store, "delete_pages")
+
+        if not self.can_delete:
+            print(
+                f"ATTENTION : le backend '{self.vector_store_name}' ne gère pas la suppression : "
+                "les pages supprimées ou raccourcies laisseront des fiches obsolètes."
+            )
 
     def run_sync(self) -> dict:
 
@@ -87,21 +99,71 @@ class IngestionPipeline:
 
         sync_state = SyncStateStore(self.data_dir / f"sync_state_{self.data_source}.json")
 
-        print("Vérification des pages Confluence nouvelles ou modifiées...")
-        documents = loader.load_changed_documents(sync_state)
+        print("Vérification des pages Confluence nouvelles, modifiées ou supprimées...")
+        documents, current_page_ids = loader.load_changed_documents(sync_state)
 
-        if not documents:
-            print("Aucune page modifiée depuis la dernière synchronisation.")
-            return {"status": "up_to_date", "pages_processed": 0, "chunks_ingested": 0}
+        # Pages connues de l'index mais absentes de Confluence = supprimees.
+        deleted_page_ids = sync_state.known_page_ids() - current_page_ids
 
-        print(f"{len(documents)} page(s) nouvelle(s) ou modifiée(s) : ingestion en cours...")
-        n_chunks = self._index(documents)
+        # Garde-fou : si Confluence ne renvoie AUCUNE page (cle d'espace
+        # erronee, droits retires...), on ne vide pas l'index entier.
+        if not current_page_ids and deleted_page_ids:
+            print(
+                "ATTENTION : Confluence n'a renvoyé aucune page. Suppression annulée "
+                "par sécurité -- vérifier CONFLUENCE_SPACE_KEYS et les identifiants."
+            )
+            deleted_page_ids = set()
 
-        # Sauvegarde APRES l'indexation reussie : une page n'est
-        # jamais marquee synchronisee si l'indexation a echoue.
+        summary = {
+            "pages_processed": len(documents),
+            "chunks_ingested": 0,
+            "stale_chunks_deleted": 0,
+            "pages_deleted": 0,
+            "chunks_deleted": 0,
+        }
+
+        if not documents and not deleted_page_ids:
+            print("Aucun changement depuis la dernière synchronisation.")
+            summary["status"] = "up_to_date"
+            return summary
+
+        if documents:
+
+            print(f"{len(documents)} page(s) nouvelle(s) ou modifiée(s) : ingestion en cours...")
+            new_chunk_ids = self._index(documents)
+            summary["chunks_ingested"] = len(new_chunk_ids)
+
+            if self.can_delete:
+                # Pages raccourcies : retire les anciennes fiches de ces
+                # pages qui ne correspondent a aucun fragment actuel.
+                summary["stale_chunks_deleted"] = self.vector_store.delete_pages(
+                    [document.id for document in documents],
+                    keep_ids=new_chunk_ids,
+                )
+
+        if deleted_page_ids and self.can_delete:
+
+            print(f"{len(deleted_page_ids)} page(s) supprimée(s) de Confluence : nettoyage de l'index...")
+            summary["chunks_deleted"] = self.vector_store.delete_pages(deleted_page_ids)
+            summary["pages_deleted"] = len(deleted_page_ids)
+
+            for page_id in deleted_page_ids:
+                sync_state.remove(page_id)
+
+        self._wait_for_indexing()
+
+        # Sauvegarde APRES toutes les ecritures reussies : sync_state
+        # reste le reflet exact de l'index.
         sync_state.save()
 
-        return {"status": "synced", "pages_processed": len(documents), "chunks_ingested": n_chunks}
+        print(
+            f"Synchronisation terminée : {summary['chunks_ingested']} fiche(s) indexée(s), "
+            f"{summary['stale_chunks_deleted'] + summary['chunks_deleted']} fiche(s) obsolète(s) supprimée(s)."
+        )
+
+        summary["status"] = "synced"
+
+        return summary
 
     def _sync_local(self) -> dict:
 
@@ -110,22 +172,35 @@ class IngestionPipeline:
             return {"status": "already_populated", "pages_processed": 0, "chunks_ingested": 0}
 
         documents = DocumentLoader(self.docs_dir).load_documents()
-        n_chunks = self._index(documents)
+        chunk_ids = self._index(documents)
+        self._wait_for_indexing()
 
-        return {"status": "ingested", "pages_processed": len(documents), "chunks_ingested": n_chunks}
+        return {"status": "ingested", "pages_processed": len(documents), "chunks_ingested": len(chunk_ids)}
 
-    def _index(self, documents) -> int:
+    def _index(self, documents) -> list:
+        """
+        Decoupe, vectorise et envoie les documents. Chaque fragment
+        recoit le page_id de sa page d'origine. Retourne la liste des
+        identifiants des fragments envoyes.
+        """
 
-        chunks = self.chunker.chunk_documents(documents)
+        chunks = []
+
+        # Decoupage page par page, pour savoir a quelle page appartient
+        # chaque fragment.
+        for document in documents:
+            for chunk in self.chunker.chunk_documents([document]):
+                chunk.page_id = document.id
+                chunks.append(chunk)
 
         embedded_chunks = [self.embedding_service.embed_chunk(chunk) for chunk in chunks]
 
         self.vector_store.add_chunks(embedded_chunks)
 
+        return [chunk.id for chunk in chunks]
+
+    def _wait_for_indexing(self):
+
         if self.vector_store_name == "azure_search":
-            # Indexation asynchrone cote Azure (constat fait lors du benchmark).
+            # Indexation quasi temps reel cote Azure (valeur empirique).
             time.sleep(5)
-
-        print(f"{len(chunks)} chunks indexés.")
-
-        return len(chunks)

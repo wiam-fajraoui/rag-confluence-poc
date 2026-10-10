@@ -20,48 +20,38 @@ from azure.search.documents.indexes.models import (
 )
 from azure.search.documents.models import VectorizedQuery
 
-from models.chunk import Chunk
 from models.search_result import SearchResult
 
 
 class VectorStoreAzureSearch:
     """
-    Implementation Azure AI Search du stockage/retrieval vectoriel,
-    avec la meme interface que les 3 autres : add_chunks(), search(),
-    is_empty().
+    Implementation Azure AI Search du stockage/retrieval vectoriel :
+    add_chunks(), search(), is_empty(), delete_pages().
 
-    Effectue une recherche hybride (mots-cles + vecteur) avec
-    classement semantique, confirmee fonctionnelle sur le niveau
-    Gratuit (voir test_azure_search_hybrid_semantic.py). L'ordre des
-    resultats retournes par Azure beneficie donc du reclassement
-    semantique.
+    Chaque fiche porte le champ page_id (identifiant de la page
+    d'origine), qui permet de retrouver et supprimer tous les
+    fragments d'une page : Azure ne connait que des fiches
+    independantes, sans notion de page.
 
-    Calcul de la distance -- deux cas selon le mode :
+    IMPORTANT : le schema de l'index fait partie du contrat entre
+    l'ingestion-service et le rag-service. Ce fichier doit rester
+    identique dans les deux services : si le rag-service declarait un
+    schema sans page_id, Azure refuserait la mise a jour de l'index
+    (un champ existant ne peut pas etre retire).
 
-    - Mode vectoriel pur (query_text absent) : formule
-      score = 1 / (1 + distance_cosinus), confirmee empiriquement,
-      compatible avec RAGService.DISTANCE_THRESHOLD_VECTOR.
-
-    - Mode hybride (query_text fourni) : utilise
-      @search.reranker_score plutot que @search.score. Ce choix
-      fait suite a un test de calibration qui a montre que
-      @search.score (le score de fusion mots-cles+vecteur, type
-      Reciprocal Rank Fusion) ne separe PAS correctement les cas
-      pertinents des cas hors-sujet -- un document sans rapport
-      pouvait obtenir un meilleur score qu'un document pertinent,
-      simplement par recoupement de mots-cles. @search.reranker_score
-      est documente officiellement par Microsoft sur une echelle
-      fixe de 0 (non pertinent) a 4 (repond completement a la
-      question), pensee specifiquement pour mesurer la pertinence
-      -- convertie ici en distance (4 - reranker_score) pour garder
-      la convention "plus petit = plus pertinent" du reste du
-      pipeline. A utiliser avec RAGService.DISTANCE_THRESHOLD_HYBRID.
-
-    Nom de la configuration semantique sur l'index :
-    "chunks-semantic-config".
+    Calcul de la distance :
+    - mode vectoriel pur (query_text absent) : distance = 1/score - 1
+      (score = 1 / (1 + distance_cosinus), confirme empiriquement) ;
+    - mode hybride (query_text fourni) : distance = 4 - reranker_score
+      (@search.reranker_score, echelle officielle 0 a 4).
     """
 
     _SEMANTIC_CONFIG_NAME = "chunks-semantic-config"
+
+    # Plafond de fragments recuperes pour UNE page lors d'une
+    # suppression : largement au-dessus du nombre de sections d'une
+    # page reelle.
+    _MAX_CHUNKS_PER_PAGE = 1000
 
     def __init__(
         self,
@@ -89,6 +79,7 @@ class VectorStoreAzureSearch:
             SimpleField(name="id", type=SearchFieldDataType.String, key=True),
             SearchableField(name="content", type=SearchFieldDataType.String),
             SearchableField(name="source", type=SearchFieldDataType.String, filterable=True),
+            SimpleField(name="page_id", type=SearchFieldDataType.String, filterable=True),
             SearchField(
                 name="embedding",
                 type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -98,8 +89,6 @@ class VectorStoreAzureSearch:
             ),
         ]
 
-        # Metrique cosinus, coherente avec pgvector et Qdrant, pour
-        # garder les distances comparables entre les 3 backends.
         vector_search = VectorSearch(
             algorithms=[
                 HnswAlgorithmConfiguration(
@@ -135,22 +124,69 @@ class VectorStoreAzureSearch:
 
     def is_empty(self) -> bool:
 
-        count = self.search_client.get_document_count()
-        return count == 0
+        return self.search_client.get_document_count() == 0
 
     def add_chunks(self, chunks: list):
+
+        # Azure AI Search refuse un lot vide (entre 1 et 32000 actions).
+        # Cas reel : une page trop courte peut produire 0 morceau.
+        if not chunks:
+            return
 
         documents = [
             {
                 "id": self._safe_id(chunk.id),
                 "content": chunk.content,
                 "source": chunk.source,
+                "page_id": getattr(chunk, "page_id", None),
                 "embedding": chunk.embedding,
             }
             for chunk in chunks
         ]
 
         self.search_client.upload_documents(documents=documents)
+
+    def delete_pages(self, page_ids, keep_ids=None) -> int:
+        """
+        Supprime les fiches des pages donnees, sauf celles dont
+        l'identifiant figure dans keep_ids. Retourne le nombre de
+        fiches supprimees.
+
+        - Page supprimee dans Confluence : keep_ids vide, toutes ses
+          fiches sont supprimees.
+        - Page modifiee : keep_ids = identifiants des fragments qui
+          viennent d'etre (re)envoyes ; seules les anciennes fiches
+          qui n'existent plus (sections retirees) sont supprimees.
+          On ne supprime jamais une fiche qu'on vient d'envoyer, ce
+          qui evite tout conflit d'ordre entre suppression et envoi.
+        """
+
+        keep = {self._safe_id(chunk_id) for chunk_id in (keep_ids or [])}
+
+        to_delete = []
+
+        for page_id in page_ids:
+
+            if not page_id:
+                continue
+
+            results = self.search_client.search(
+                search_text="*",
+                filter=f"page_id eq '{page_id}'",
+                select=["id"],
+                top=self._MAX_CHUNKS_PER_PAGE,
+            )
+
+            to_delete.extend(
+                {"id": result["id"]}
+                for result in results
+                if result["id"] not in keep
+            )
+
+        if to_delete:
+            self.search_client.delete_documents(documents=to_delete)
+
+        return len(to_delete)
 
     def search(self, query_embedding, n_results: int = 3, query_text: str = None) -> list:
 
@@ -160,11 +196,6 @@ class VectorStoreAzureSearch:
             fields="embedding",
         )
 
-        # Recherche hybride (mots-cles + vecteur) avec classement
-        # semantique quand le texte de la question est fourni ;
-        # recherche vectorielle pure en repli sinon (comportement
-        # d'origine, garde par securite si query_text n'est pas
-        # transmis par l'appelant).
         if query_text:
 
             results = self.search_client.search(
@@ -189,22 +220,8 @@ class VectorStoreAzureSearch:
         for r in results:
 
             if query_text:
-
-                # Mode hybride : on utilise desormais le score de
-                # reclassement semantique (@search.reranker_score),
-                # documente officiellement sur une echelle fixe de 0
-                # (non pertinent) a 4 (repond completement a la
-                # question) -- voir la docstring de la classe.
-                # Converti en distance (0 = parfait, 4 = hors-sujet)
-                # pour rester compatible avec la convention
-                # "plus petit = plus pertinent" du reste du pipeline.
-                reranker_score = r["@search.reranker_score"]
-                distance = 4.0 - reranker_score
-
+                distance = 4.0 - r["@search.reranker_score"]
             else:
-
-                # Mode vectoriel pur : formule cosinus habituelle,
-                # inchangee.
                 score = r["@search.score"]
                 distance = (1 / score) - 1 if score > 0 else float("inf")
 
@@ -222,8 +239,5 @@ class VectorStoreAzureSearch:
     @staticmethod
     def _safe_id(chunk_id: str) -> str:
 
-        # Les cles de document Azure AI Search n'acceptent que
-        # lettres, chiffres, tiret, underscore et signe egal -- pas
-        # d'espaces ni d'accents (possibles dans nos ids de pages
-        # Confluence, ex. "Kubernetes Deployment_1").
+        # Azure n'accepte dans les cles que lettres, chiffres, "_", "-", "=".
         return re.sub(r"[^A-Za-z0-9_\-=]", "_", chunk_id)
