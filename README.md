@@ -109,7 +109,7 @@ All figures were measured on the PoC.
 
 | Area | Result |
 |---|---|
-| Corpus | 2 Confluence spaces (Infra, DevOps), ~15 test pages written with varied content and formats (hierarchy, code blocks, lists). Last full re-index: 256 chunks |
+| Corpus | 2 Confluence spaces (Infra, DevOps), 16 test pages written with varied content and formats (hierarchy, code blocks, lists). Last full re-index: 256 chunks from 15 pages |
 | Incremental sync | 5 scenarios validated end to end: full re-index, shortened page, deleted page (22 chunks removed), page with no indexable content, no-change run |
 | Vector store benchmark (301 chunks, 6 questions) | Azure AI Search indexed in 4.6 s with 121 ms average search latency. Local stores answered in 7–55 ms. All four returned the same top-1 document on every question |
 | Relevance threshold | 2.0, calibrated on 19 observed results: relevant passages 0.53–1.88, off-topic 2.16–2.40 |
