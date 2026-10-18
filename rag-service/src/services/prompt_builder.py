@@ -51,6 +51,7 @@ Tu dois respecter STRICTEMENT les règles suivantes :
    la fin de ta réponse -- les marqueurs [n] dans le texte suffisent,
    la liste détaillée est construite séparément.
 
+
 Rédige une réponse claire, concise et professionnelle.
 """
 

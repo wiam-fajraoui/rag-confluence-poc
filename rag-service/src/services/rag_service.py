@@ -12,6 +12,24 @@ from models.citation import Citation
 # rester lisible dans l'interface (pas le chunk entier).
 _EXCERPT_MAX_LENGTH = 160
 
+# Au-dela de ce nombre de sources distinctes retenues, la reponse
+# agrege plusieurs sujets (ex. "Quelles sont les bonnes pratiques ?") :
+# on precise qu'elle n'est pas exhaustive, car le top-k limite le
+# nombre de documents consultes. Fait dans le code plutot que dans le
+# prompt : le LLM appliquait cette consigne de facon irreguliere
+# (ignoree, puis ajoutee a tort sur une question de comparaison).
+_MIN_SOURCES_FOR_PARTIAL_NOTE = 3
+_PARTIAL_NOTE = "D'après les documents les plus pertinents trouvés (liste non exhaustive) :\n\n"
+
+# Diversite des sources : on recupere plus de candidats que necessaire,
+# puis on garde au plus _MAX_CHUNKS_PER_SOURCE fragments par page dans
+# les _N_RESULTS retenus. Sans cette limite, une page riche (ex.
+# Ansible.md, 5 fragments sur 5) peut occuper tout le contexte et
+# evincer la seconde page d'une question de comparaison.
+_N_CANDIDATES = 10
+_N_RESULTS = 5
+_MAX_CHUNKS_PER_SOURCE = 3
+
 
 class RAGService:
 
@@ -73,11 +91,13 @@ class RAGService:
             question
         )
 
-        search_results = self.vector_store.search(
+        candidates = self.vector_store.search(
             question_embedding,
-            n_results=5,
+            n_results=_N_CANDIDATES,
             query_text=question if self.use_hybrid else None,
         )
+
+        search_results = self._diversify(candidates)
 
         print("\n" + "=" * 70)
         print("SEARCH RESULTS")
@@ -140,6 +160,20 @@ class RAGService:
         )
 
         citations = self._extract_citations(answer, filtered_results)
+
+        # Sources reellement utilisees (citees) par la reponse, et non
+        # simplement retenues par la recherche : une question precise
+        # peut retenir plusieurs pages proches mais n'en citer qu'une.
+        # Pas de mention sur un refus : _extract_citations renvoie alors
+        # une liste vide.
+        distinct_sources = {citation.source for citation in citations}
+
+        if citations and len(distinct_sources) >= _MIN_SOURCES_FOR_PARTIAL_NOTE:
+            print(
+                f"\n{len(distinct_sources)} sources distinctes citees : "
+                "mention 'liste non exhaustive' ajoutee."
+            )
+            answer = _PARTIAL_NOTE + answer
 
         return ChatResponse(
             answer=answer,
@@ -213,6 +247,29 @@ class RAGService:
             )
 
         return fallback_citations
+
+    @staticmethod
+    def _diversify(candidates: list) -> list:
+        """
+        Garde les candidats dans leur ordre de pertinence, en limitant
+        le nombre de fragments par source, jusqu'a _N_RESULTS.
+        """
+
+        selected = []
+        per_source = {}
+
+        for result in candidates:
+
+            if per_source.get(result.source, 0) >= _MAX_CHUNKS_PER_SOURCE:
+                continue
+
+            per_source[result.source] = per_source.get(result.source, 0) + 1
+            selected.append(result)
+
+            if len(selected) == _N_RESULTS:
+                break
+
+        return selected
 
     @staticmethod
     def _make_excerpt(content: str) -> str:

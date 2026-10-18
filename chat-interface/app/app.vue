@@ -12,8 +12,6 @@ interface ChatMessage {
   isError?: boolean;
 }
 
-const config = useRuntimeConfig();
-
 const messages = ref<ChatMessage[]>([]);
 const question = ref("");
 const isLoading = ref(false);
@@ -40,8 +38,10 @@ async function sendQuestion() {
   scrollToBottom();
 
   try {
+    // Appel a la route serveur Nuxt (meme origine que la page) :
+    // c'est elle qui relaie la question au rag-service en interne.
     const response = await $fetch<{ answer: string; citations: Citation[] }>(
-      `${config.public.apiBase}/ask`,
+      "/api/ask",
       {
         method: "POST",
         body: { question: trimmed },
@@ -54,16 +54,17 @@ async function sendQuestion() {
       citations: response.citations,
     });
   } catch (error: any) {
-    // FastAPI renvoie le detail de l'erreur dans error.data.detail
-    // (ex. question vide, service pas encore pret) -- on l'affiche
-    // si disponible, sinon un message generique.
-    const detail = error?.data?.detail;
+    // La route /api/ask retransmet le detail renvoye par FastAPI
+    // (ex. question vide, service pas encore pret) dans
+    // error.data.data.detail -- on l'affiche si disponible, sinon un
+    // message generique.
+    const detail = error?.data?.data?.detail ?? error?.data?.detail;
 
     messages.value.push({
       role: "assistant",
       content:
         detail ??
-        "Une erreur est survenue en contactant l'assistant. Vérifie que l'API (uvicorn) est bien lancée.",
+        "Une erreur est survenue en contactant l'assistant. Vérifie que le rag-service est bien lancé.",
       isError: true,
     });
   } finally {

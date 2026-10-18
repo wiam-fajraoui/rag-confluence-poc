@@ -31,7 +31,7 @@ services:
     volumes:
       - chroma_shared:/shared/chroma
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       ingestion-service:
         condition: service_healthy
@@ -39,8 +39,7 @@ services:
   chat-interface:
     build: ./chat-interface
     environment:
-      # Appel fait par le NAVIGATEUR -> localhost = machine hote.
-      NUXT_PUBLIC_API_BASE: http://localhost:8000
+      - NUXT_RAG_API_URL=http://rag-service:8000  
     ports:
       - "3000:3000"
     depends_on:
