@@ -272,9 +272,47 @@ class RAGService:
         return selected
 
     @staticmethod
+    def _clean_markdown(content: str) -> str:
+        """
+        Transforme le Markdown d'un fragment en texte lisible pour
+        l'extrait affiche sous la reponse : le titre du document est
+        retire (il est deja affiche comme source), les marqueurs de
+        titres, de listes, de gras et de code sont supprimes.
+        """
+
+        parts = []
+
+        for line in content.splitlines():
+
+            text = line.strip()
+
+            # Lignes vides, separateurs et delimiteurs de blocs de code
+            if not text or text == "---" or text.startswith("```"):
+                continue
+
+            # Titre du document ("# Kubernetes") : redondant avec la source
+            if re.match(r"^#\s", text):
+                continue
+
+            # Sous-titre ("## Bonnes pratiques") : garde le texte
+            if re.match(r"^#{2,6}\s", text):
+                parts.append(re.sub(r"^#{2,6}\s*", "", text) + " —")
+                continue
+
+            # Puces et listes numerotees
+            text = re.sub(r"^([-*+]|\d+\.)\s+", "", text)
+
+            # Gras, italique et code en ligne
+            text = text.replace("**", "").replace("`", "")
+
+            parts.append(text)
+
+        return " ".join(parts)
+
+    @staticmethod
     def _make_excerpt(content: str) -> str:
 
-        flattened = " ".join(content.split())
+        flattened = " ".join(RAGService._clean_markdown(content).split())
 
         if len(flattened) <= _EXCERPT_MAX_LENGTH:
             return flattened

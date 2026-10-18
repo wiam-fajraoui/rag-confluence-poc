@@ -1,0 +1,10 @@
+resource_group_name        = "<your-resource-group>"
+location                   = "<azure-region>"
+search_service_name        = "<globally-unique-search-name>"
+search_sku                 = "free"
+openai_account_name        = "<globally-unique-openai-name>"
+openai_sku                 = "S0"
+openai_model_name          = "gpt-4o-mini"
+openai_model_version       = "2024-07-18"
+openai_deployment_sku_name = "DataZoneStandard"
+openai_deployment_capacity = 30

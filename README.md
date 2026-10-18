@@ -2,7 +2,7 @@
 
 A retrieval-augmented assistant that answers questions about Confluence documentation in plain language, with citations to the source pages, built on Azure AI Search and Azure OpenAI.
 
-![Chat interface: a question, a grounded answer with numbered citations, and the cited Confluence pages](docs/images/chat-demo.png)
+![Chat interface: a question, a grounded answer with numbered citations, and the cited Confluence pages](docs/images/sombre-securite-citations.png)
 
 ## Overview
 
