@@ -35,8 +35,8 @@ flowchart LR
 
     CONF[Confluence Cloud<br/>REST API]
 
-    U --> CHAT
-    U -- POST /ask --> RAG
+    U -- page + POST /api/ask --> CHAT
+    CHAT -- POST /ask<br/>internal network --> RAG
     CONF -- pages + versions --> ING
     ING -- upsert / delete chunks --> SEARCH
     RAG -- hybrid search --> SEARCH
@@ -48,6 +48,8 @@ The backend is split into **two independent microservices**, each with its own c
 
 - `ingestion-service` is the only one that **writes** to the index;
 - `rag-service` only **reads** from it.
+
+The browser only talks to `chat-interface`. Its Nuxt server route (`/api/ask`) forwards each question to `rag-service` over the internal Docker network (backend-for-frontend pattern), so `rag-service` is never exposed to the browser and no CORS configuration is needed.
 
 This keeps the batch workload (syncing Confluence) separate from the request path (answering users), so each service can be changed, restarted or scaled on its own. The two services share a contract: the same index, the same embedding model and the same index schema. `rag-service` checks that contract at startup through `GET /status`.
 
@@ -70,9 +72,11 @@ Backends are selected through environment variables (`DATA_SOURCE`, `VECTOR_STOR
 
 - **Incremental sync.** Each page's Confluence version number is stored after a successful run. Only new or changed pages are reprocessed.
 - **Stale chunk cleanup.** Every chunk carries a filterable `page_id`. Chunks from deleted pages are removed, and so are leftover chunks from shortened pages. A safeguard skips deletions if Confluence returns zero pages, so an outage cannot empty the index.
-- **Relevance threshold.** Hybrid search returns the top 5 passages. Only those with distance ≤ 2.0 (`distance = 4 − semantic reranker score`) are kept. If none qualifies, the service refuses **without calling the LLM**.
-- **Grounded answers with citations.** The prompt numbers each passage (`DOCUMENT 1..n`) and asks the model to cite them as `[n]`. The service maps the markers back to source pages and returns the source plus a 160-character excerpt. Refusals return no citations.
+- **Relevance threshold.** Only passages with distance ≤ 2.0 (`distance = 4 − semantic reranker score`) are kept. If none qualifies, the service refuses **without calling the LLM**.
+- **Source diversity.** Hybrid search retrieves 10 candidates; at most 3 chunks per page are kept, 5 in total. This stops one long page from crowding out the others, for example on comparison questions such as "Ansible vs Kubernetes".
+- **Grounded answers with citations.** The prompt numbers each passage (`DOCUMENT 1..n`) and asks the model to cite them as `[n]`. The service maps the markers back to source pages and returns the source plus a 160-character excerpt, cleaned of Markdown formatting. Refusals return no citations. When an answer cites 3 or more different pages, it starts with a note that the list is not exhaustive.
 - **Confluence format conversion.** Confluence storage format (XHTML + macros) is converted to Markdown, including code blocks. Chunks are split by heading, and code-only sections are merged with their explanation.
+- **Chat interface.** Answers are rendered as Markdown (lists, code blocks; raw HTML escaped), citation markers become numbered badges linked to their source, and the UI has example questions, loading and error states, and a light/dark theme.
 - **Documented API.** OpenAPI docs are available at `/docs` on both services.
 
 ## Design decisions
@@ -115,6 +119,7 @@ All figures were measured on the PoC.
 | Relevance threshold | 2.0, calibrated on 19 observed results: relevant passages 0.53–1.88, off-topic 2.16–2.40 |
 | End-to-end response time (5 questions, local Docker calling Azure) | Median 2.8 s, mean 2.9 s, range 2.1–4.0 s. Search takes about 0.1 s; most of the time is LLM generation |
 | Tests | 9 API tests with Pytest (4 ingestion, 5 RAG), all passing |
+| Estimated production cost | About €68/month for ~3,000 questions (Azure pricing calculator: AI Search Basic + semantic ranking + `gpt-4o-mini`), excluding container hosting. The search service is most of it; the LLM costs about €1/month |
 
 ## Getting started
 
@@ -165,6 +170,8 @@ Then fill in the values:
 
 `DATA_SOURCE` and `VECTOR_STORE` must be identical in both files. Never commit `.env` files.
 
+`chat-interface` needs no secret. Docker Compose sets `NUXT_RAG_API_URL=http://rag-service:8000` so its server can reach `rag-service`; when running the UI outside Docker (`npm install`, then `npm run dev`), it defaults to `http://127.0.0.1:8000`.
+
 ### 4. Run with Docker Compose
 
 ```bash
@@ -174,7 +181,7 @@ docker compose logs -f ingestion-service
 ```
 
 - Chat UI: http://localhost:3000
-- RAG API docs: http://localhost:8000/docs
+- RAG API docs: http://localhost:8000/docs (port published on `127.0.0.1` only, for local testing)
 - Ingestion API docs: http://localhost:8001/docs
 
 `rag-service` waits until `ingestion-service` is healthy. `/health` only responds after the initial sync. To trigger a sync manually:
@@ -183,7 +190,7 @@ docker compose logs -f ingestion-service
 curl -X POST http://localhost:8001/sync
 ```
 
-Example question:
+To test the RAG API directly (the chat UI goes through its own server instead):
 
 ```bash
 curl -X POST http://localhost:8000/ask \
@@ -216,6 +223,8 @@ rag-confluence-poc/
 └── docker-compose.yml   # Orchestration: healthchecks, startup order, volumes, internal network
 ```
 
+The code is versioned on GitHub and mirrored to Azure Repos, which will host the Azure Pipelines workflow. Each milestone has a Git tag, from `v1-poc-local-stable` to `v9-suppressions`.
+
 Both Python services follow the same layout:
 
 | Folder | Role |
@@ -234,6 +243,7 @@ Both Python services follow the same layout:
 - **No conversation memory.** Follow-up questions are handled without the previous turns.
 - **LLM output is not fully deterministic,** even at temperature 0.
 - **Sync optimisations** have been designed but not yet integrated: listing page versions only and downloading changed pages, and polling the index instead of a fixed 5-second wait after writes.
+- **Confluence conversion defect.** On one page (Kubernetes), two headings are lost during conversion and their text merges into the previous section. Source diversity works around it at query time; the converter still needs a fix.
 - **Shared connector code is duplicated** across the two services. This is the trade-off of keeping them fully independent.
 
 ## Author
